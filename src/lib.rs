@@ -24,7 +24,6 @@ use windows::{
 
 use settings::Settings;
 
-const MEOW_INTERVAL: Duration = Duration::from_secs(60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 static MEOW_WAVS: [&[u8]; 9] = [
@@ -90,7 +89,7 @@ fn on_frame(_ui: &Ui) {
         return;
     }
 
-    if now.duration_since(state.last_meow) >= MEOW_INTERVAL {
+    if now.duration_since(state.last_meow) >= Settings::get().interval() {
         state.last_meow = now;
         play_meow();
     }
