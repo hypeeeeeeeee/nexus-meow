@@ -4,6 +4,7 @@ use nexus::{
     imgui::Ui,
     paths::get_addon_dir,
     render,
+    UpdateProvider,
 };
 use std::{
     sync::Mutex,
@@ -91,4 +92,6 @@ nexus::export! {
     name: "Meow",
     signature: -0x4D454F57,
     load,
+    provider: UpdateProvider::GitHub,
+    update_link: "https://github.com/hypeeeeeeeee/nexus-meow"
 }
