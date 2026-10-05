@@ -1,6 +1,27 @@
 [package]
 name = "nexus-meow"
+description = "Plays meow sounds while your in game"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib"]
+name = "meow"
+
 [dependencies]
+log = "0.4"
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+]
+
+[dependencies.nexus]
+git = "https://github.com/Zerthox/nexus-rs"
+features = ["log", "mumble"]
+
+[profile.release]
+lto = true
+opt-level = "s"
