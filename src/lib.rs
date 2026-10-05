@@ -11,6 +11,7 @@ use nexus::{
 use std::{
     collections::hash_map::RandomState,
     hash::BuildHasher,
+    ops::Range,
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -24,7 +25,8 @@ use windows::{
 
 use settings::Settings;
 
-const CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const STALE_TIMEOUT: Duration = Duration::from_secs(2);
 
 static MEOW_WAVS: [&[u8]; 9] = [
     include_bytes!("../meow0.wav"),
@@ -43,24 +45,44 @@ static LAST_MEOW: AtomicUsize = AtomicUsize::new(usize::MAX);
 struct State {
     last_meow: Instant,
     last_check: Instant,
+    in_game: bool,
+    last_tick: u32,
+    tick_changed: Instant,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
-static PLAYING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+struct Playing {
+    wav: Vec<u8>,
+    until: Option<Instant>,
+}
+
+static PLAYING: Mutex<Playing> = Mutex::new(Playing {
+    wav: Vec::new(),
+    until: None,
+});
+
+fn is_playing(now: Instant) -> bool {
+    PLAYING
+        .lock()
+        .unwrap()
+        .until
+        .is_some_and(|until| now < until)
+}
 
 fn load() {
     let now = Instant::now();
     *STATE.lock().unwrap() = Some(State {
         last_meow: now,
         last_check: now,
+        in_game: false,
+        last_tick: 0,
+        tick_changed: now,
     });
     Settings::load();
     register_render(RenderType::Render, render!(on_frame)).revert_on_unload();
     register_render(RenderType::OptionsRender, render!(Settings::render)).revert_on_unload();
     log::info!("Meow addon loaded");
-
-    play_meow();
 }
 
 fn unload() {
@@ -68,10 +90,18 @@ fn unload() {
     stop_sound();
 }
 
-fn in_game() -> bool {
-    read_mumble_link()
-        .map(|link| link.ui_tick > 0 && link.context.map_id != 0)
-        .unwrap_or(false)
+impl State {
+    fn update_in_game(&mut self, now: Instant) -> bool {
+        let Some(link) = read_mumble_link() else { return true };
+
+        if link.ui_tick != self.last_tick {
+            self.last_tick = link.ui_tick;
+            self.tick_changed = now;
+        }
+        let live = now.duration_since(self.tick_changed) < STALE_TIMEOUT;
+
+        link.ui_tick > 0 && link.context.map_id != 0 && live
+    }
 }
 
 fn on_frame(_ui: &Ui) {
@@ -84,12 +114,20 @@ fn on_frame(_ui: &Ui) {
     }
     state.last_check = now;
 
-    if !in_game() {
+    let in_game = state.update_in_game(now);
+    let entered = in_game && !state.in_game;
+    if in_game != state.in_game {
+        state.in_game = in_game;
+        log::debug!("In game: {in_game}");
+    }
+
+    if !in_game {
         state.last_meow = now;
         return;
     }
 
-    if now.duration_since(state.last_meow) >= Settings::get().interval() {
+    let elapsed = now.duration_since(state.last_meow) >= Settings::get().interval();
+    if entered || (elapsed && !is_playing(now)) {
         state.last_meow = now;
         play_meow();
     }
@@ -120,10 +158,11 @@ pub(crate) fn play_meow() {
 
     let mut playing = PLAYING.lock().unwrap();
     stop_sound();
-    *playing = wav;
+    playing.until = wav_duration(&wav).map(|duration| Instant::now() + duration);
+    playing.wav = wav;
     unsafe {
         let _ = PlaySoundW(
-            PCWSTR(playing.as_ptr() as *const u16),
+            PCWSTR(playing.wav.as_ptr() as *const u16),
             None,
             SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
         );
@@ -149,9 +188,16 @@ fn stop_sound() {
     }
 }
 
-fn scale_wav(wav: &mut [u8], factor: f32) -> bool {
+struct WavInfo {
+    tag: u16,
+    bits: u16,
+    byte_rate: u32,
+    data: Range<usize>,
+}
+
+fn parse_wav(wav: &[u8]) -> Option<WavInfo> {
     if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
-        return false;
+        return None;
     }
 
     let mut format = None;
@@ -165,22 +211,39 @@ fn scale_wav(wav: &mut [u8], factor: f32) -> bool {
             b"fmt " if end - start >= 16 => {
                 let fmt = &wav[start..end];
                 let mut tag = u16::from_le_bytes([fmt[0], fmt[1]]);
+                let byte_rate = u32::from_le_bytes(fmt[8..12].try_into().unwrap());
                 let bits = u16::from_le_bytes([fmt[14], fmt[15]]);
                 if tag == 0xFFFE && fmt.len() >= 26 {
                     tag = u16::from_le_bytes([fmt[24], fmt[25]]);
                 }
-                format = Some((tag, bits));
+                format = Some((tag, bits, byte_rate));
             }
             b"data" => {
-                let Some((tag, bits)) = format else { return false };
-                return scale_samples(&mut wav[start..end], tag, bits, factor);
+                let (tag, bits, byte_rate) = format?;
+                return Some(WavInfo {
+                    tag,
+                    bits,
+                    byte_rate,
+                    data: start..end,
+                });
             }
             _ => {}
         }
 
         pos = start.saturating_add(size).saturating_add(size & 1);
     }
-    false
+    None
+}
+
+fn wav_duration(wav: &[u8]) -> Option<Duration> {
+    let info = parse_wav(wav)?;
+    (info.byte_rate > 0)
+        .then(|| Duration::from_secs_f64(info.data.len() as f64 / info.byte_rate as f64))
+}
+
+fn scale_wav(wav: &mut [u8], factor: f32) -> bool {
+    let Some(info) = parse_wav(wav) else { return false };
+    scale_samples(&mut wav[info.data], info.tag, info.bits, factor)
 }
 
 fn scale_samples(data: &mut [u8], tag: u16, bits: u16, factor: f32) -> bool {
@@ -230,4 +293,24 @@ nexus::export! {
     unload,
     provider: UpdateProvider::GitHub,
     update_link: "https://github.com/hypeeeeeeeee/nexus-meow"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_meows_have_duration() {
+        for wav in MEOW_WAVS {
+            let duration = wav_duration(wav).expect("valid wav");
+            assert!(duration > Duration::from_millis(500) && duration < Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn scaling_keeps_wav_valid() {
+        let mut wav = MEOW_WAVS[0].to_vec();
+        assert!(scale_wav(&mut wav, 0.5));
+        assert_eq!(wav_duration(&wav), wav_duration(MEOW_WAVS[0]));
+    }
 }

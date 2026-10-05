@@ -1,5 +1,5 @@
 use nexus::{
-    imgui::{Slider, Ui},
+    imgui::{Slider, SliderFlags, Ui},
     paths::get_addon_dir,
 };
 use std::{fs, path::PathBuf, sync::Mutex, time::Duration};
@@ -85,6 +85,7 @@ impl Settings {
             let mut settings = SETTINGS.lock().unwrap();
             Slider::new("Meow volume", 0u32, 100)
                 .display_format("%d%%")
+                .flags(SliderFlags::ALWAYS_CLAMP)
                 .build(ui, &mut settings.volume);
         }
         if ui.is_item_deactivated_after_edit() {
@@ -94,6 +95,7 @@ impl Settings {
             let mut settings = SETTINGS.lock().unwrap();
             Slider::new("Meow interval", Self::MIN_INTERVAL, Self::MAX_INTERVAL)
                 .display_format("%d s")
+                .flags(SliderFlags::ALWAYS_CLAMP)
                 .build(ui, &mut settings.interval);
         }
         if ui.is_item_deactivated_after_edit() {

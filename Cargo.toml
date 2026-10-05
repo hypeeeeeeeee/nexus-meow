@@ -3,6 +3,7 @@ name = "nexus-meow"
 description = "Plays meow sounds while your in game"
 version = "1.0.0"
 edition = "2024"
+authors = ["Hype.5628"]
 
 [lib]
 crate-type = ["cdylib"]
