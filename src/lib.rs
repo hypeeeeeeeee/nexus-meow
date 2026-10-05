@@ -9,7 +9,12 @@ use nexus::{
     UpdateProvider,
 };
 use std::{
-    sync::Mutex,
+    collections::hash_map::RandomState,
+    hash::BuildHasher,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use windows::{
@@ -22,7 +27,19 @@ use settings::Settings;
 const MEOW_INTERVAL: Duration = Duration::from_secs(60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-static MEOW_WAV: &[u8] = include_bytes!("../meow.wav");
+static MEOW_WAVS: [&[u8]; 9] = [
+    include_bytes!("../meow0.wav"),
+    include_bytes!("../meow1.wav"),
+    include_bytes!("../meow2.wav"),
+    include_bytes!("../meow3.wav"),
+    include_bytes!("../meow4.wav"),
+    include_bytes!("../meow5.wav"),
+    include_bytes!("../meow6.wav"),
+    include_bytes!("../meow7.wav"),
+    include_bytes!("../meow8.wav"),
+];
+
+static LAST_MEOW: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 struct State {
     last_meow: Instant,
@@ -96,7 +113,7 @@ pub(crate) fn play_meow() {
                 None
             }
         });
-    let mut wav = custom.unwrap_or_else(|| MEOW_WAV.to_vec());
+    let mut wav = custom.unwrap_or_else(|| random_meow().to_vec());
 
     if volume < 100 && !scale_wav(&mut wav, volume as f32 / 100.0) {
         log::warn!("Unsupported WAV format, playing meow at full volume");
@@ -112,6 +129,19 @@ pub(crate) fn play_meow() {
             SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
         );
     }
+}
+
+fn random_meow() -> &'static [u8] {
+    let random = RandomState::new().hash_one(Instant::now()) as usize;
+    let last = LAST_MEOW.load(Ordering::Relaxed);
+    let index = if last < MEOW_WAVS.len() {
+        let index = random % (MEOW_WAVS.len() - 1);
+        if index >= last { index + 1 } else { index }
+    } else {
+        random % MEOW_WAVS.len()
+    };
+    LAST_MEOW.store(index, Ordering::Relaxed);
+    MEOW_WAVS[index]
 }
 
 fn stop_sound() {
